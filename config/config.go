@@ -1,8 +1,8 @@
 // Package config loads Chrome plugin configuration.
 //
-// Configuration is read from the OPENTALON_CHROME_CONFIG environment variable
-// (a JSON object injected by the OpenTalon host from the plugin's config: block
-// in config.yaml), with individual env vars as fallbacks for standalone use.
+// Configuration is received as a JSON string via the OpenTalon plugin protocol
+// (passed during the Capabilities handshake), with individual CHROME_* env
+// vars as fallbacks for standalone use.
 package config
 
 import (
@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	defaultCDPURL  = "http://localhost:9222"
-	defaultTimeout = 30 * time.Second
+	defaultCDPURL = "http://localhost:9222"
+	// DefaultTimeout is the per-action deadline used when no timeout is configured.
+	DefaultTimeout = 30 * time.Second
 )
 
 // Config holds runtime configuration for the Chrome plugin.
@@ -26,10 +27,11 @@ type Config struct {
 	Timeout string `json:"timeout"`
 }
 
-// Load reads configuration, preferring OPENTALON_CHROME_CONFIG JSON and
-// falling back to individual CHROME_* environment variables.
+// Load parses configuration from configJSON (the JSON-encoded config: block
+// delivered by the OpenTalon host during the Capabilities handshake), then
+// applies any CHROME_* environment variable overrides for standalone use.
 //
-// OpenTalon injects OPENTALON_CHROME_CONFIG from the plugin's config: block:
+// configJSON corresponds to the plugin's config: block in config.yaml:
 //
 //	plugins:
 //	  chrome:
@@ -37,11 +39,11 @@ type Config struct {
 //	      cdp_url: "http://chrome-sidecar:9222"
 //	      screenshot_dir: "/data/screenshots"
 //	      timeout: "45s"
-func Load() (Config, error) {
+func Load(configJSON string) (Config, error) {
 	cfg := Config{}
 
-	if raw := os.Getenv("OPENTALON_CHROME_CONFIG"); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+	if configJSON != "" {
+		if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 			return Config{}, err
 		}
 	}
@@ -76,5 +78,5 @@ func (c Config) ParseTimeout() time.Duration {
 			return d
 		}
 	}
-	return defaultTimeout
+	return DefaultTimeout
 }

@@ -6,20 +6,12 @@ import (
 	"net"
 	"os"
 
-	"github.com/opentalon/opentalon-chrome/browser"
-	"github.com/opentalon/opentalon-chrome/config"
 	chromeplugin "github.com/opentalon/opentalon-chrome/plugin"
 	pluginpkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("opentalon-chrome: load config: %v", err)
-	}
-
-	b := browser.NewClient(cfg.CDPURL, cfg.ParseTimeout())
-	handler := chromeplugin.NewHandler(b, cfg.ScreenshotDir, cfg.ParseTimeout())
+	handler := chromeplugin.NewHandler()
 
 	// TCP mode: CHROME_GRPC_PORT=50051 → listen on TCP so Chrome and the plugin
 	// can run as Docker sidecars while OpenTalon connects via grpc://.

@@ -46,7 +46,7 @@ func (s *stubBrowser) Evaluate(ctx context.Context, url, script string) (string,
 }
 
 func newTestHandler(b browser.Browser) *Handler {
-	return NewHandler(b, "/tmp", 30*time.Second)
+	return &Handler{b: b, screenshotDir: "/tmp", timeout: 30 * time.Second}
 }
 
 // --- Capabilities ---

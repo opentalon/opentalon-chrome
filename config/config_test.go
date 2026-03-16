@@ -7,12 +7,11 @@ import (
 )
 
 func TestLoad_defaults(t *testing.T) {
-	t.Setenv("OPENTALON_CHROME_CONFIG", "")
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
 
-	cfg, err := Load()
+	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -22,22 +21,21 @@ func TestLoad_defaults(t *testing.T) {
 	if cfg.ScreenshotDir != os.TempDir() {
 		t.Errorf("ScreenshotDir = %q, want %q", cfg.ScreenshotDir, os.TempDir())
 	}
-	if cfg.ParseTimeout() != defaultTimeout {
-		t.Errorf("Timeout = %v, want %v", cfg.ParseTimeout(), defaultTimeout)
+	if cfg.ParseTimeout() != DefaultTimeout {
+		t.Errorf("Timeout = %v, want %v", cfg.ParseTimeout(), DefaultTimeout)
 	}
 }
 
-func TestLoad_fromOpenTalonConfig(t *testing.T) {
-	t.Setenv("OPENTALON_CHROME_CONFIG", `{
-		"cdp_url": "http://chrome-sidecar:9222",
-		"screenshot_dir": "/data/screenshots",
-		"timeout": "60s"
-	}`)
+func TestLoad_fromJSON(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
 
-	cfg, err := Load()
+	cfg, err := Load(`{
+		"cdp_url": "http://chrome-sidecar:9222",
+		"screenshot_dir": "/data/screenshots",
+		"timeout": "60s"
+	}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -53,10 +51,9 @@ func TestLoad_fromOpenTalonConfig(t *testing.T) {
 }
 
 func TestLoad_envOverridesJSON(t *testing.T) {
-	t.Setenv("OPENTALON_CHROME_CONFIG", `{"cdp_url": "http://from-json:9222"}`)
 	t.Setenv("CHROME_CDP_URL", "http://from-env:9222")
 
-	cfg, err := Load()
+	cfg, err := Load(`{"cdp_url": "http://from-json:9222"}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -66,9 +63,7 @@ func TestLoad_envOverridesJSON(t *testing.T) {
 }
 
 func TestLoad_invalidJSON(t *testing.T) {
-	t.Setenv("OPENTALON_CHROME_CONFIG", "not-valid-json")
-
-	_, err := Load()
+	_, err := Load("not-valid-json")
 	if err == nil {
 		t.Error("Load() expected error for invalid JSON, got nil")
 	}
@@ -76,21 +71,21 @@ func TestLoad_invalidJSON(t *testing.T) {
 
 func TestParseTimeout_invalid(t *testing.T) {
 	cfg := Config{Timeout: "not-a-duration"}
-	if cfg.ParseTimeout() != defaultTimeout {
-		t.Errorf("ParseTimeout = %v, want default %v for invalid input", cfg.ParseTimeout(), defaultTimeout)
+	if cfg.ParseTimeout() != DefaultTimeout {
+		t.Errorf("ParseTimeout = %v, want default %v for invalid input", cfg.ParseTimeout(), DefaultTimeout)
 	}
 }
 
 func TestParseTimeout_zero(t *testing.T) {
 	cfg := Config{Timeout: "0s"}
-	if cfg.ParseTimeout() != defaultTimeout {
-		t.Errorf("ParseTimeout = %v, want default %v for zero duration", cfg.ParseTimeout(), defaultTimeout)
+	if cfg.ParseTimeout() != DefaultTimeout {
+		t.Errorf("ParseTimeout = %v, want default %v for zero duration", cfg.ParseTimeout(), DefaultTimeout)
 	}
 }
 
 func TestParseTimeout_empty(t *testing.T) {
 	cfg := Config{}
-	if cfg.ParseTimeout() != defaultTimeout {
-		t.Errorf("ParseTimeout = %v, want default %v for empty", cfg.ParseTimeout(), defaultTimeout)
+	if cfg.ParseTimeout() != DefaultTimeout {
+		t.Errorf("ParseTimeout = %v, want default %v for empty", cfg.ParseTimeout(), DefaultTimeout)
 	}
 }
