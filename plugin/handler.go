@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/opentalon/opentalon-chrome/browser"
+	"github.com/opentalon/opentalon-chrome/config"
 	pluginpkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
@@ -25,9 +26,23 @@ type Handler struct {
 	timeout       time.Duration
 }
 
-// NewHandler returns a Handler backed by the given Browser implementation.
-func NewHandler(b browser.Browser, screenshotDir string, timeout time.Duration) *Handler {
-	return &Handler{b: b, screenshotDir: screenshotDir, timeout: timeout}
+// NewHandler returns a Handler with default configuration. The host will call
+// Configure (via the Capabilities RPC) before any Execute calls.
+func NewHandler() *Handler {
+	return &Handler{timeout: config.DefaultTimeout, screenshotDir: ""}
+}
+
+// Configure implements pluginpkg.Configurable. It parses the JSON config
+// delivered by the OpenTalon host and initialises the browser client.
+func (h *Handler) Configure(configJSON string) error {
+	cfg, err := config.Load(configJSON)
+	if err != nil {
+		return err
+	}
+	h.b = browser.NewClient(cfg.CDPURL, cfg.ParseTimeout())
+	h.screenshotDir = cfg.ScreenshotDir
+	h.timeout = cfg.ParseTimeout()
+	return nil
 }
 
 // Capabilities declares all actions this plugin exposes.

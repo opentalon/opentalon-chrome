@@ -85,7 +85,7 @@ chromium --headless --no-sandbox --remote-debugging-port=9222
 
 ## Configuration
 
-Configuration is read from `OPENTALON_CHROME_CONFIG` (a JSON object injected by OpenTalon from the plugin's `config:` block). Individual `CHROME_*` environment variables override the JSON values and can be used for ad-hoc overrides or standalone testing.
+Configuration is delivered as a JSON string by the OpenTalon host via the `Configure` RPC call during the Capabilities handshake (populated from the plugin's `config:` block in `config.yaml`). Individual `CHROME_*` environment variables override those values and can be used for ad-hoc overrides or standalone testing.
 
 | config.yaml key   | Env var override         | Default              | Description                                                  |
 |-------------------|--------------------------|----------------------|--------------------------------------------------------------|
