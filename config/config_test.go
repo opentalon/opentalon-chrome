@@ -89,3 +89,74 @@ func TestParseTimeout_empty(t *testing.T) {
 		t.Errorf("ParseTimeout = %v, want default %v for empty", cfg.ParseTimeout(), DefaultTimeout)
 	}
 }
+
+// --- New login / store fields ---
+
+func TestLoad_loginFieldsFromJSON(t *testing.T) {
+	t.Setenv("CHROME_LOGIN_CDP_URL", "")
+	t.Setenv("CHROME_LOGIN_URL", "")
+	t.Setenv("CHROME_LOGIN_PASSWORD", "")
+	t.Setenv("CHROME_DATA_DIR", "")
+
+	cfg, err := Load(`{
+		"login_cdp_url": "http://chrome-login:9222",
+		"login_url": "https://chrome-login.example.com",
+		"login_password": "s3cr3t",
+		"data_dir": "/data/creds"
+	}`)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.LoginCDPURL != "http://chrome-login:9222" {
+		t.Errorf("LoginCDPURL = %q, want http://chrome-login:9222", cfg.LoginCDPURL)
+	}
+	if cfg.LoginURL != "https://chrome-login.example.com" {
+		t.Errorf("LoginURL = %q, want https://chrome-login.example.com", cfg.LoginURL)
+	}
+	if cfg.LoginPassword != "s3cr3t" {
+		t.Errorf("LoginPassword = %q, want s3cr3t", cfg.LoginPassword)
+	}
+	if cfg.DataDir != "/data/creds" {
+		t.Errorf("DataDir = %q, want /data/creds", cfg.DataDir)
+	}
+}
+
+func TestLoad_loginFieldsEnvOverride(t *testing.T) {
+	t.Setenv("CHROME_LOGIN_CDP_URL", "http://env-login:9222")
+	t.Setenv("CHROME_LOGIN_URL", "https://env.example.com")
+	t.Setenv("CHROME_LOGIN_PASSWORD", "env-pass")
+	t.Setenv("CHROME_DATA_DIR", "/env/data")
+
+	cfg, err := Load(`{
+		"login_cdp_url": "http://json-login:9222",
+		"login_url": "https://json.example.com",
+		"login_password": "json-pass",
+		"data_dir": "/json/data"
+	}`)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.LoginCDPURL != "http://env-login:9222" {
+		t.Errorf("LoginCDPURL = %q, want env override", cfg.LoginCDPURL)
+	}
+	if cfg.LoginURL != "https://env.example.com" {
+		t.Errorf("LoginURL = %q, want env override", cfg.LoginURL)
+	}
+	if cfg.LoginPassword != "env-pass" {
+		t.Errorf("LoginPassword = %q, want env override", cfg.LoginPassword)
+	}
+	if cfg.DataDir != "/env/data" {
+		t.Errorf("DataDir = %q, want env override", cfg.DataDir)
+	}
+}
+
+func TestLoad_dataDirDefault(t *testing.T) {
+	t.Setenv("CHROME_DATA_DIR", "")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.DataDir == "" {
+		t.Error("DataDir should have a default value (os.TempDir())")
+	}
+}

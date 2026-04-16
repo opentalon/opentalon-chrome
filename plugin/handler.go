@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/opentalon/opentalon-chrome/browser"
 	"github.com/opentalon/opentalon-chrome/config"
+	"github.com/opentalon/opentalon-chrome/store"
 	pluginpkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
@@ -22,8 +24,12 @@ const pluginName = "chrome"
 // Handler implements pluginpkg.Handler using a headless Chrome browser.
 type Handler struct {
 	b             browser.Browser
+	loginBrowser  browser.Browser // VNC Chrome for interactive login sessions; may be nil
 	screenshotDir string
 	timeout       time.Duration
+	loginURL      string
+	loginPassword string
+	store         *store.Store
 }
 
 // NewHandler returns a Handler with default configuration. The host will call
@@ -42,6 +48,20 @@ func (h *Handler) Configure(configJSON string) error {
 	h.b = browser.NewClient(cfg.CDPURL, cfg.ParseTimeout())
 	h.screenshotDir = cfg.ScreenshotDir
 	h.timeout = cfg.ParseTimeout()
+	h.loginURL = cfg.LoginURL
+	h.loginPassword = cfg.LoginPassword
+
+	// Set up the VNC Chrome client when a separate CDP URL is configured.
+	if cfg.LoginCDPURL != "" {
+		h.loginBrowser = browser.NewClient(cfg.LoginCDPURL, cfg.ParseTimeout())
+	}
+
+	// Open the credential store.
+	db, err := store.Open(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("open credential store: %w", err)
+	}
+	h.store = store.New(db)
 	return nil
 }
 
@@ -49,7 +69,7 @@ func (h *Handler) Configure(configJSON string) error {
 func (h *Handler) Capabilities() pluginpkg.CapabilitiesMsg {
 	return pluginpkg.CapabilitiesMsg{
 		Name:        pluginName,
-		Description: "Headless Chrome browser: navigate pages, extract content, take screenshots, and run JavaScript via a Chrome sidecar",
+		Description: "Headless Chrome browser: navigate pages, extract content, take screenshots, run JavaScript, and manage login session cookies",
 		Actions: []pluginpkg.ActionMsg{
 			{
 				Name:        "navigate",
@@ -107,6 +127,56 @@ func (h *Handler) Capabilities() pluginpkg.CapabilitiesMsg {
 					{Name: "script", Description: "JavaScript expression to evaluate", Type: "string", Required: true},
 				},
 			},
+			// ── Login session / cookie actions ────────────────────────────────────
+			{
+				Name:        "start_login_session",
+				Description: "Returns the URL and password for the interactive VNC Chrome session where the user can log in to a service manually. Call this before asking the user to log in.",
+				// UserOnly: true — re-enable once opentalon pkg/plugin.ActionMsg includes UserOnly.
+			},
+			{
+				Name:        "get_cookies",
+				Description: "Navigate to url in the interactive VNC Chrome (login browser) and return all cookies as a JSON array, optionally filtered by domain suffix. Call this after the user has logged in to capture the session cookies.",
+				Parameters: []pluginpkg.ParameterMsg{
+					{Name: "url", Description: "URL to navigate to before collecting cookies", Type: "string", Required: true},
+					{Name: "domain", Description: "Domain suffix to filter cookies (e.g. linkedin.com). Leave empty to return all cookies.", Type: "string", Required: false},
+				},
+			},
+			{
+				Name:        "navigate_with_cookies",
+				Description: "Inject the provided cookies into headless Chrome and navigate to url. Returns the page title. Use the JSON cookies returned by get_credentials.",
+				Parameters: []pluginpkg.ParameterMsg{
+					{Name: "url", Description: "URL to navigate to", Type: "string", Required: true},
+					{Name: "cookies", Description: "JSON array of cookie objects (from get_credentials)", Type: "string", Required: true},
+				},
+			},
+			{
+				// InjectContextArgs: []string{"actor_id"} — re-enable once opentalon pkg/plugin.ActionMsg includes InjectContextArgs.
+				// Until then actor_id is injected by the host when the opentalon core is updated.
+				Name:        "save_credentials",
+				Description: "Save browser login cookies under a user-chosen name for the current entity. Use a descriptive name like 'linkedin-work' or 'github-personal' to distinguish multiple accounts.",
+				Parameters: []pluginpkg.ParameterMsg{
+					{Name: "name", Description: "Unique credential name, e.g. 'linkedin-work'", Type: "string", Required: true},
+					{Name: "cookies", Description: "JSON array of cookie objects (from get_cookies)", Type: "string", Required: true},
+				},
+			},
+			{
+				Name:        "get_credentials",
+				Description: "Retrieve saved browser cookies by name for the current entity. Returns the cookie JSON for use with navigate_with_cookies.",
+				Parameters: []pluginpkg.ParameterMsg{
+					{Name: "name", Description: "Credential name to retrieve", Type: "string", Required: true},
+				},
+			},
+			{
+				Name:        "list_credentials",
+				Description: "List the names of all saved browser credentials for the current entity.",
+			},
+			{
+				Name:        "delete_credentials",
+				Description: "Delete a saved browser credential by name for the current entity.",
+				Parameters: []pluginpkg.ParameterMsg{
+					{Name: "name", Description: "Credential name to delete", Type: "string", Required: true},
+				},
+			},
 		},
 	}
 }
@@ -131,6 +201,20 @@ func (h *Handler) Execute(req pluginpkg.Request) pluginpkg.Response {
 		return h.typeText(ctx, req)
 	case "evaluate":
 		return h.evaluate(ctx, req)
+	case "start_login_session":
+		return h.startLoginSession(req)
+	case "get_cookies":
+		return h.getCookies(ctx, req)
+	case "navigate_with_cookies":
+		return h.navigateWithCookies(ctx, req)
+	case "save_credentials":
+		return h.saveCredentials(req)
+	case "get_credentials":
+		return h.getCredentials(req)
+	case "list_credentials":
+		return h.listCredentials(req)
+	case "delete_credentials":
+		return h.deleteCredentials(req)
 	default:
 		return pluginpkg.Response{
 			CallID: req.ID,
@@ -243,6 +327,132 @@ func (h *Handler) evaluate(ctx context.Context, req pluginpkg.Request) pluginpkg
 		return errResp(req.ID, err.Error())
 	}
 	return pluginpkg.Response{CallID: req.ID, Content: result}
+}
+
+// ── Login session / cookie handlers ──────────────────────────────────────────
+
+func (h *Handler) startLoginSession(req pluginpkg.Request) pluginpkg.Response {
+	if h.loginURL == "" {
+		return errResp(req.ID, "start_login_session: no login URL configured (CHROME_LOGIN_URL is not set)")
+	}
+	content := fmt.Sprintf("Open the following URL in your browser to access the interactive Chrome session:\n\nURL: %s\nUsername: opentalon\nPassword: %s\n\nLog in to the desired service, then tell me when you are done.",
+		h.loginURL, h.loginPassword)
+	return pluginpkg.Response{CallID: req.ID, Content: content}
+}
+
+func (h *Handler) getCookies(ctx context.Context, req pluginpkg.Request) pluginpkg.Response {
+	rawURL, ok := req.Args["url"]
+	if !ok || rawURL == "" {
+		return errResp(req.ID, "get_cookies: url is required")
+	}
+	domain := req.Args["domain"]
+
+	// Use the VNC login browser if configured; fall back to headless Chrome.
+	b := h.b
+	if h.loginBrowser != nil {
+		b = h.loginBrowser
+	}
+
+	cookiesJSON, err := b.GetCookies(ctx, rawURL, domain)
+	if err != nil {
+		return errResp(req.ID, err.Error())
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: cookiesJSON}
+}
+
+func (h *Handler) navigateWithCookies(ctx context.Context, req pluginpkg.Request) pluginpkg.Response {
+	rawURL, ok := req.Args["url"]
+	if !ok || rawURL == "" {
+		return errResp(req.ID, "navigate_with_cookies: url is required")
+	}
+	cookiesJSON, ok := req.Args["cookies"]
+	if !ok || cookiesJSON == "" {
+		return errResp(req.ID, "navigate_with_cookies: cookies is required")
+	}
+	title, err := h.b.NavigateWithCookies(ctx, rawURL, cookiesJSON)
+	if err != nil {
+		return errResp(req.ID, err.Error())
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: fmt.Sprintf("Navigated to %q (title: %q)", rawURL, title)}
+}
+
+// ── Credential store handlers ─────────────────────────────────────────────────
+
+func (h *Handler) saveCredentials(req pluginpkg.Request) pluginpkg.Response {
+	if h.store == nil {
+		return errResp(req.ID, "save_credentials: credential store not initialised")
+	}
+	actorID := req.Args["actor_id"]
+	if actorID == "" {
+		return errResp(req.ID, "save_credentials: actor_id not available (context injection failed)")
+	}
+	name := req.Args["name"]
+	if name == "" {
+		return errResp(req.ID, "save_credentials: name is required")
+	}
+	cookies := req.Args["cookies"]
+	if cookies == "" {
+		return errResp(req.ID, "save_credentials: cookies is required")
+	}
+	if err := h.store.Save(actorID, name, cookies); err != nil {
+		return errResp(req.ID, fmt.Sprintf("save_credentials: %v", err))
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: fmt.Sprintf("Credentials saved as %q.", name)}
+}
+
+func (h *Handler) getCredentials(req pluginpkg.Request) pluginpkg.Response {
+	if h.store == nil {
+		return errResp(req.ID, "get_credentials: credential store not initialised")
+	}
+	actorID := req.Args["actor_id"]
+	if actorID == "" {
+		return errResp(req.ID, "get_credentials: actor_id not available")
+	}
+	name := req.Args["name"]
+	if name == "" {
+		return errResp(req.ID, "get_credentials: name is required")
+	}
+	cookies, err := h.store.Get(actorID, name)
+	if err != nil {
+		return errResp(req.ID, err.Error())
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: cookies}
+}
+
+func (h *Handler) listCredentials(req pluginpkg.Request) pluginpkg.Response {
+	if h.store == nil {
+		return errResp(req.ID, "list_credentials: credential store not initialised")
+	}
+	actorID := req.Args["actor_id"]
+	if actorID == "" {
+		return errResp(req.ID, "list_credentials: actor_id not available")
+	}
+	names, err := h.store.List(actorID)
+	if err != nil {
+		return errResp(req.ID, fmt.Sprintf("list_credentials: %v", err))
+	}
+	if len(names) == 0 {
+		return pluginpkg.Response{CallID: req.ID, Content: "No saved credentials."}
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: strings.Join(names, "\n")}
+}
+
+func (h *Handler) deleteCredentials(req pluginpkg.Request) pluginpkg.Response {
+	if h.store == nil {
+		return errResp(req.ID, "delete_credentials: credential store not initialised")
+	}
+	actorID := req.Args["actor_id"]
+	if actorID == "" {
+		return errResp(req.ID, "delete_credentials: actor_id not available")
+	}
+	name := req.Args["name"]
+	if name == "" {
+		return errResp(req.ID, "delete_credentials: name is required")
+	}
+	if err := h.store.Delete(actorID, name); err != nil {
+		return errResp(req.ID, fmt.Sprintf("delete_credentials: %v", err))
+	}
+	return pluginpkg.Response{CallID: req.ID, Content: fmt.Sprintf("Credentials %q deleted.", name)}
 }
 
 func errResp(callID, msg string) pluginpkg.Response {

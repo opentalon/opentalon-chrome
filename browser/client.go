@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -43,7 +44,7 @@ func (c *Client) wsURL(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reach Chrome at %s: %w", c.cdpURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -55,7 +56,7 @@ func (c *Client) wsURL(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("parse /json/version response: %w", err)
 	}
 	if v.WebSocketDebuggerURL == "" {
-		return "", fmt.Errorf("Chrome returned empty webSocketDebuggerUrl")
+		return "", fmt.Errorf("chrome returned empty webSocketDebuggerUrl")
 	}
 
 	// Chrome may advertise "localhost" even when accessed via a Docker hostname.
@@ -272,6 +273,95 @@ func (c *Client) Evaluate(ctx context.Context, rawURL, script string) (string, e
 		return "", fmt.Errorf("marshal evaluate result: %w", err)
 	}
 	return string(out), nil
+}
+
+// GetCookies implements Browser.
+// It navigates to url in a fresh tab, collects all cookies via CDP, optionally
+// filters them by domain suffix, and returns a JSON array of cookie objects.
+func (c *Client) GetCookies(ctx context.Context, rawURL, domain string) (string, error) {
+	ctx, tCancel := c.withTimeout(ctx)
+	defer tCancel()
+
+	tabCtx, cancel, err := c.newTabCtx(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer cancel()
+
+	var cookies []*network.Cookie
+	if err := chromedp.Run(tabCtx,
+		chromedp.Navigate(rawURL),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var e error
+			cookies, e = network.GetCookies().Do(ctx)
+			return e
+		}),
+	); err != nil {
+		return "", fmt.Errorf("get cookies from %s: %w", rawURL, err)
+	}
+
+	// Filter by domain suffix when requested.
+	if domain != "" {
+		filtered := cookies[:0]
+		for _, c := range cookies {
+			if strings.HasSuffix(c.Domain, domain) || strings.HasSuffix(strings.TrimPrefix(c.Domain, "."), domain) {
+				filtered = append(filtered, c)
+			}
+		}
+		cookies = filtered
+	}
+
+	out, err := json.Marshal(cookies)
+	if err != nil {
+		return "", fmt.Errorf("marshal cookies: %w", err)
+	}
+	return string(out), nil
+}
+
+// NavigateWithCookies implements Browser.
+// It deserialises cookiesJSON (a JSON array of network.Cookie objects), injects
+// them via SetCookies before navigation, then navigates to url and returns the
+// page title. This lets headless Chrome replay a login session captured via
+// GetCookies on the interactive VNC Chrome instance.
+func (c *Client) NavigateWithCookies(ctx context.Context, rawURL, cookiesJSON string) (string, error) {
+	ctx, tCancel := c.withTimeout(ctx)
+	defer tCancel()
+
+	tabCtx, cancel, err := c.newTabCtx(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer cancel()
+
+	// Deserialise stored cookies into CDP CookieParam objects.
+	var stored []*network.Cookie
+	if err := json.Unmarshal([]byte(cookiesJSON), &stored); err != nil {
+		return "", fmt.Errorf("parse cookies JSON: %w", err)
+	}
+	params := make([]*network.CookieParam, len(stored))
+	for i, c := range stored {
+		params[i] = &network.CookieParam{
+			Name:     c.Name,
+			Value:    c.Value,
+			Domain:   c.Domain,
+			Path:     c.Path,
+			Secure:   c.Secure,
+			HTTPOnly: c.HTTPOnly,
+			SameSite: c.SameSite,
+		}
+	}
+
+	var title string
+	if err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return network.SetCookies(params).Do(ctx)
+		}),
+		chromedp.Navigate(rawURL),
+		chromedp.Title(&title),
+	); err != nil {
+		return "", fmt.Errorf("navigate with cookies to %s: %w", rawURL, err)
+	}
+	return title, nil
 }
 
 // screenshotFilename turns a URL into a safe .png filename.
