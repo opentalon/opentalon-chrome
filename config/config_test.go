@@ -10,6 +10,7 @@ func TestLoad_defaults(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
+	t.Setenv("CHROME_DATA_DIR", t.TempDir())
 
 	cfg, err := Load("")
 	if err != nil {
@@ -30,11 +31,13 @@ func TestLoad_fromJSON(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
+	t.Setenv("CHROME_DATA_DIR", "")
 
 	cfg, err := Load(`{
 		"cdp_url": "http://chrome-sidecar:9222",
 		"screenshot_dir": "/data/screenshots",
-		"timeout": "60s"
+		"timeout": "60s",
+		"data_dir": "/data/creds"
 	}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
@@ -52,8 +55,9 @@ func TestLoad_fromJSON(t *testing.T) {
 
 func TestLoad_envOverridesJSON(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "http://from-env:9222")
+	t.Setenv("CHROME_DATA_DIR", "/env/data")
 
-	cfg, err := Load(`{"cdp_url": "http://from-json:9222"}`)
+	cfg, err := Load(`{"cdp_url": "http://from-json:9222", "data_dir": "/json/data"}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -150,13 +154,23 @@ func TestLoad_loginFieldsEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoad_dataDirDefault(t *testing.T) {
+func TestLoad_storageRequired(t *testing.T) {
 	t.Setenv("CHROME_DATA_DIR", "")
+	t.Setenv("CHROME_DATABASE_URL", "")
+	_, err := Load("")
+	if err == nil {
+		t.Error("Load() should return an error when neither data_dir nor database_url is set")
+	}
+}
+
+func TestLoad_databaseURLAccepted(t *testing.T) {
+	t.Setenv("CHROME_DATA_DIR", "")
+	t.Setenv("CHROME_DATABASE_URL", "postgres://user:pass@localhost/db?sslmode=disable")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if cfg.DataDir == "" {
-		t.Error("DataDir should have a default value (os.TempDir())")
+	if cfg.DatabaseURL != "postgres://user:pass@localhost/db?sslmode=disable" {
+		t.Errorf("DatabaseURL = %q, want postgres URL", cfg.DatabaseURL)
 	}
 }

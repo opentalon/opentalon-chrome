@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -26,9 +27,9 @@ func (s *Store) Save(entityID, name, cookiesJSON string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.SQLDB().Exec(
-		`INSERT INTO browser_credentials (entity_id, name, cookies, created_at, updated_at)
+		s.db.q(`INSERT INTO browser_credentials (entity_id, name, cookies, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(entity_id, name) DO UPDATE SET cookies=excluded.cookies, updated_at=excluded.updated_at`,
+		 ON CONFLICT(entity_id, name) DO UPDATE SET cookies=excluded.cookies, updated_at=excluded.updated_at`),
 		entityID, name, cookiesJSON, now, now,
 	)
 	return err
@@ -39,10 +40,10 @@ func (s *Store) Save(entityID, name, cookiesJSON string) error {
 func (s *Store) Get(entityID, name string) (string, error) {
 	var cookies string
 	err := s.db.SQLDB().QueryRow(
-		`SELECT cookies FROM browser_credentials WHERE entity_id = ? AND name = ?`,
+		s.db.q(`SELECT cookies FROM browser_credentials WHERE entity_id = ? AND name = ?`),
 		entityID, name,
 	).Scan(&cookies)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("no credentials found for %q", name)
 	}
 	return cookies, err
@@ -51,7 +52,7 @@ func (s *Store) Get(entityID, name string) (string, error) {
 // List returns the names of all saved credentials for entityID.
 func (s *Store) List(entityID string) ([]string, error) {
 	rows, err := s.db.SQLDB().Query(
-		`SELECT name FROM browser_credentials WHERE entity_id = ? ORDER BY name`,
+		s.db.q(`SELECT name FROM browser_credentials WHERE entity_id = ? ORDER BY name`),
 		entityID,
 	)
 	if err != nil {
@@ -72,7 +73,7 @@ func (s *Store) List(entityID string) ([]string, error) {
 // Delete removes the credential record for (entityID, name).
 func (s *Store) Delete(entityID, name string) error {
 	_, err := s.db.SQLDB().Exec(
-		`DELETE FROM browser_credentials WHERE entity_id = ? AND name = ?`,
+		s.db.q(`DELETE FROM browser_credentials WHERE entity_id = ? AND name = ?`),
 		entityID, name,
 	)
 	return err

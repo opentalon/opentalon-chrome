@@ -23,13 +23,14 @@ const pluginName = "chrome"
 
 // Handler implements pluginpkg.Handler using a headless Chrome browser.
 type Handler struct {
-	b             browser.Browser
-	loginBrowser  browser.Browser // VNC Chrome for interactive login sessions; may be nil
-	screenshotDir string
-	timeout       time.Duration
-	loginURL      string
-	loginPassword string
-	store         *store.Store
+	b                  browser.Browser
+	loginBrowser       browser.Browser // VNC Chrome for interactive login sessions; may be nil
+	screenshotDir      string
+	timeout            time.Duration
+	loginURL           string
+	loginPassword      string
+	store              *store.Store
+	allowClientActorID bool // see config.AllowClientActorID
 }
 
 // NewHandler returns a Handler with default configuration. The host will call
@@ -50,18 +51,24 @@ func (h *Handler) Configure(configJSON string) error {
 	h.timeout = cfg.ParseTimeout()
 	h.loginURL = cfg.LoginURL
 	h.loginPassword = cfg.LoginPassword
+	h.allowClientActorID = cfg.AllowClientActorID
 
 	// Set up the VNC Chrome client when a separate CDP URL is configured.
 	if cfg.LoginCDPURL != "" {
 		h.loginBrowser = browser.NewClient(cfg.LoginCDPURL, cfg.ParseTimeout())
 	}
 
-	// Open the credential store.
-	db, err := store.Open(cfg.DataDir)
+	// Open the credential store — Postgres when a URL is provided, SQLite otherwise.
+	var storeDB *store.DB
+	if cfg.DatabaseURL != "" {
+		storeDB, err = store.OpenPostgres(cfg.DatabaseURL)
+	} else {
+		storeDB, err = store.OpenSQLite(cfg.DataDir)
+	}
 	if err != nil {
 		return fmt.Errorf("open credential store: %w", err)
 	}
-	h.store = store.New(db)
+	h.store = store.New(storeDB)
 	return nil
 }
 
@@ -129,7 +136,7 @@ func (h *Handler) Capabilities() pluginpkg.CapabilitiesMsg {
 			},
 			// ── Login session / cookie actions ────────────────────────────────────
 			{
-				Name:        "start_login_session",
+				Name:        "get_login_url",
 				Description: "Returns the URL and password for the interactive VNC Chrome session where the user can log in to a service manually. Call this before asking the user to log in.",
 				// UserOnly: true — re-enable once opentalon pkg/plugin.ActionMsg includes UserOnly.
 			},
@@ -201,8 +208,8 @@ func (h *Handler) Execute(req pluginpkg.Request) pluginpkg.Response {
 		return h.typeText(ctx, req)
 	case "evaluate":
 		return h.evaluate(ctx, req)
-	case "start_login_session":
-		return h.startLoginSession(req)
+	case "get_login_url":
+		return h.getLoginURL(req)
 	case "get_cookies":
 		return h.getCookies(ctx, req)
 	case "navigate_with_cookies":
@@ -331,9 +338,9 @@ func (h *Handler) evaluate(ctx context.Context, req pluginpkg.Request) pluginpkg
 
 // ── Login session / cookie handlers ──────────────────────────────────────────
 
-func (h *Handler) startLoginSession(req pluginpkg.Request) pluginpkg.Response {
+func (h *Handler) getLoginURL(req pluginpkg.Request) pluginpkg.Response {
 	if h.loginURL == "" {
-		return errResp(req.ID, "start_login_session: no login URL configured (CHROME_LOGIN_URL is not set)")
+		return errResp(req.ID, "get_login_url: no login URL configured (CHROME_LOGIN_URL is not set)")
 	}
 	content := fmt.Sprintf("Open the following URL in your browser to access the interactive Chrome session:\n\nURL: %s\nUsername: opentalon\nPassword: %s\n\nLog in to the desired service, then tell me when you are done.",
 		h.loginURL, h.loginPassword)
@@ -378,13 +385,32 @@ func (h *Handler) navigateWithCookies(ctx context.Context, req pluginpkg.Request
 
 // ── Credential store handlers ─────────────────────────────────────────────────
 
+// actorIDFromRequest returns the actor_id from req.Args when the operator has
+// explicitly opted in via AllowClientActorID.  When the flag is false it
+// returns an error, refusing to run credential actions with an untrusted
+// identity claim.  Remove this helper (and use a trusted context field instead)
+// once the opentalon host wires InjectContextArgs into the plugin protocol.
+func (h *Handler) actorIDFromRequest(action string, req pluginpkg.Request) (string, error) {
+	if !h.allowClientActorID {
+		return "", fmt.Errorf("%s: credential actions are disabled — "+
+			"set allow_client_actor_id: true (or CHROME_ALLOW_CLIENT_ACTOR_ID=true) only on single-tenant "+
+			"deployments where callers cannot forge actor_id; "+
+			"this restriction will be lifted once the host wires InjectContextArgs", action)
+	}
+	id := req.Args["actor_id"]
+	if id == "" {
+		return "", fmt.Errorf("%s: actor_id not available (context injection failed)", action)
+	}
+	return id, nil
+}
+
 func (h *Handler) saveCredentials(req pluginpkg.Request) pluginpkg.Response {
 	if h.store == nil {
 		return errResp(req.ID, "save_credentials: credential store not initialised")
 	}
-	actorID := req.Args["actor_id"]
-	if actorID == "" {
-		return errResp(req.ID, "save_credentials: actor_id not available (context injection failed)")
+	actorID, err := h.actorIDFromRequest("save_credentials", req)
+	if err != nil {
+		return errResp(req.ID, err.Error())
 	}
 	name := req.Args["name"]
 	if name == "" {
@@ -404,9 +430,9 @@ func (h *Handler) getCredentials(req pluginpkg.Request) pluginpkg.Response {
 	if h.store == nil {
 		return errResp(req.ID, "get_credentials: credential store not initialised")
 	}
-	actorID := req.Args["actor_id"]
-	if actorID == "" {
-		return errResp(req.ID, "get_credentials: actor_id not available")
+	actorID, err := h.actorIDFromRequest("get_credentials", req)
+	if err != nil {
+		return errResp(req.ID, err.Error())
 	}
 	name := req.Args["name"]
 	if name == "" {
@@ -423,9 +449,9 @@ func (h *Handler) listCredentials(req pluginpkg.Request) pluginpkg.Response {
 	if h.store == nil {
 		return errResp(req.ID, "list_credentials: credential store not initialised")
 	}
-	actorID := req.Args["actor_id"]
-	if actorID == "" {
-		return errResp(req.ID, "list_credentials: actor_id not available")
+	actorID, err := h.actorIDFromRequest("list_credentials", req)
+	if err != nil {
+		return errResp(req.ID, err.Error())
 	}
 	names, err := h.store.List(actorID)
 	if err != nil {
@@ -441,9 +467,9 @@ func (h *Handler) deleteCredentials(req pluginpkg.Request) pluginpkg.Response {
 	if h.store == nil {
 		return errResp(req.ID, "delete_credentials: credential store not initialised")
 	}
-	actorID := req.Args["actor_id"]
-	if actorID == "" {
-		return errResp(req.ID, "delete_credentials: actor_id not available")
+	actorID, err := h.actorIDFromRequest("delete_credentials", req)
+	if err != nil {
+		return errResp(req.ID, err.Error())
 	}
 	name := req.Args["name"]
 	if name == "" {

@@ -6,9 +6,9 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := Open(t.TempDir())
+	db, err := OpenSQLite(t.TempDir())
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("OpenSQLite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return New(db)
@@ -152,15 +152,15 @@ func TestStore_EntityIsolation(t *testing.T) {
 
 func TestDB_ReopenMigrationsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	db1, err := Open(dir)
+	db1, err := OpenSQLite(dir)
 	if err != nil {
-		t.Fatalf("first Open: %v", err)
+		t.Fatalf("first OpenSQLite: %v", err)
 	}
 	_ = db1.Close()
 
-	db2, err := Open(dir)
+	db2, err := OpenSQLite(dir)
 	if err != nil {
-		t.Fatalf("second Open (should be idempotent): %v", err)
+		t.Fatalf("second OpenSQLite (should be idempotent): %v", err)
 	}
 	_ = db2.Close()
 }

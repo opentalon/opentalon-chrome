@@ -67,16 +67,17 @@ func newTestHandler(b browser.Browser) *Handler {
 
 func newTestHandlerWithStore(t *testing.T, b browser.Browser) *Handler {
 	t.Helper()
-	db, err := store.Open(t.TempDir())
+	db, err := store.OpenSQLite(t.TempDir())
 	if err != nil {
-		t.Fatalf("store.Open: %v", err)
+		t.Fatalf("store.OpenSQLite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &Handler{
-		b:             b,
-		screenshotDir: "/tmp",
-		timeout:       30 * time.Second,
-		store:         store.New(db),
+		b:                  b,
+		screenshotDir:      "/tmp",
+		timeout:            30 * time.Second,
+		store:              store.New(db),
+		allowClientActorID: true, // test-only opt-in; production requires explicit config
 	}
 }
 
@@ -99,7 +100,7 @@ func TestCapabilities(t *testing.T) {
 	}
 	expected := []string{
 		"navigate", "get_text", "get_html", "screenshot", "click", "type_text", "evaluate",
-		"start_login_session", "get_cookies", "navigate_with_cookies",
+		"get_login_url", "get_cookies", "navigate_with_cookies",
 		"save_credentials", "get_credentials", "list_credentials", "delete_credentials",
 	}
 	for _, name := range expected {
@@ -296,22 +297,22 @@ func TestExecute_screenshot_largeImage(t *testing.T) {
 	}
 }
 
-// --- start_login_session ---
+// --- get_login_url ---
 
-func TestExecute_startLoginSession_noURL(t *testing.T) {
+func TestExecute_getLoginURL_noURL(t *testing.T) {
 	h := newTestHandler(&stubBrowser{})
 	// loginURL is empty — should return an error.
-	resp := h.Execute(pluginpkg.Request{ID: "s1", Action: "start_login_session"})
+	resp := h.Execute(pluginpkg.Request{ID: "s1", Action: "get_login_url"})
 	if resp.Error == "" {
 		t.Error("expected error when loginURL is not configured")
 	}
 }
 
-func TestExecute_startLoginSession_success(t *testing.T) {
+func TestExecute_getLoginURL_success(t *testing.T) {
 	h := newTestHandler(&stubBrowser{})
 	h.loginURL = "https://chrome-login.example.com"
 	h.loginPassword = "testpass"
-	resp := h.Execute(pluginpkg.Request{ID: "s2", Action: "start_login_session"})
+	resp := h.Execute(pluginpkg.Request{ID: "s2", Action: "get_login_url"})
 	if resp.Error != "" {
 		t.Errorf("unexpected error: %s", resp.Error)
 	}
@@ -433,6 +434,37 @@ func TestExecute_navigateWithCookies_success(t *testing.T) {
 	}
 	if !strings.Contains(resp.Content, "https://app.example.com/dash") {
 		t.Errorf("Content should contain URL, got: %s", resp.Content)
+	}
+}
+
+// --- credential actions disabled by default ---
+
+func TestExecute_credentialActions_disabledByDefault(t *testing.T) {
+	// newTestHandlerWithStore opts in; use a raw handler to verify the default.
+	db, err := store.OpenSQLite(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	h := &Handler{
+		b:             &stubBrowser{},
+		screenshotDir: "/tmp",
+		timeout:       30 * time.Second,
+		store:         store.New(db),
+		// allowClientActorID intentionally left false (the default)
+	}
+	for _, action := range []string{"save_credentials", "get_credentials", "list_credentials", "delete_credentials"} {
+		resp := h.Execute(pluginpkg.Request{
+			ID:     action + "_disabled",
+			Action: action,
+			Args:   map[string]string{"actor_id": "alice", "name": "x", "cookies": "[]"},
+		})
+		if resp.Error == "" {
+			t.Errorf("%s: expected error when allowClientActorID=false, got success", action)
+		}
+		if !strings.Contains(resp.Error, "allow_client_actor_id") {
+			t.Errorf("%s: error should mention allow_client_actor_id, got: %s", action, resp.Error)
+		}
 	}
 }
 

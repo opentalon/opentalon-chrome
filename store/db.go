@@ -1,10 +1,11 @@
-// Package store provides a lightweight SQLite-backed store for browser credentials
-// captured by the opentalon-chrome plugin.
+// Package store provides a lightweight SQL-backed store for browser credentials
+// captured by the opentalon-chrome plugin.  SQLite and PostgreSQL are supported.
 package store
 
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,24 +14,25 @@ import (
 	"strconv"
 	"strings"
 
+	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// DB wraps a SQLite database connection.
+// DB wraps a SQL database connection.
 type DB struct {
-	db *sql.DB
+	db     *sql.DB
+	driver string // "sqlite" or "postgres"
 }
 
-// Open opens (or creates) state.db in dataDir and runs pending migrations.
-func Open(dataDir string) (*DB, error) {
+// OpenSQLite opens (or creates) state.db in dataDir and runs pending migrations.
+func OpenSQLite(dataDir string) (*DB, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("store: create data dir: %w", err)
 	}
-	dbPath := filepath.Join(dataDir, "state.db")
-	raw, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	raw, err := sql.Open("sqlite", filepath.Join(dataDir, "state.db")+"?_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("store: open db: %w", err)
 	}
@@ -38,8 +40,26 @@ func Open(dataDir string) (*DB, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("store: busy_timeout: %w", err)
 	}
+	return openDB(raw, "sqlite")
+}
 
-	d := &DB{db: raw}
+// OpenPostgres opens a PostgreSQL connection at dsn and runs pending migrations.
+// dsn is a lib/pq connection string, e.g. "postgres://user:pass@host/db?sslmode=disable".
+func OpenPostgres(dsn string) (*DB, error) {
+	raw, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open db: %w", err)
+	}
+	if err := raw.Ping(); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("store: ping postgres: %w", err)
+	}
+	return openDB(raw, "postgres")
+}
+
+// openDB attaches driver metadata and runs migrations on an already-open connection.
+func openDB(raw *sql.DB, driver string) (*DB, error) {
+	d := &DB{db: raw, driver: driver}
 	if err := d.runMigrations(); err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -53,15 +73,38 @@ func (d *DB) Close() error { return d.db.Close() }
 // SQLDB returns the raw *sql.DB for use by the Store.
 func (d *DB) SQLDB() *sql.DB { return d.db }
 
+// q rewrites query placeholders for the active driver.
+// SQLite uses ?, PostgreSQL uses $1, $2, ...
+func (d *DB) q(query string) string {
+	if d.driver != "postgres" {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, ch := range query {
+		if ch == '?' {
+			n++
+			fmt.Fprintf(&b, "$%d", n)
+		} else {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
 func (d *DB) runMigrations() error {
 	if _, err := d.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)`); err != nil {
 		return fmt.Errorf("migrations: create schema_version: %w", err)
 	}
 
 	var current int
-	row := d.db.QueryRow(`SELECT version FROM schema_version LIMIT 1`)
 	var v sql.NullInt64
-	if err := row.Scan(&v); err == nil && v.Valid {
+	switch err := d.db.QueryRow(`SELECT version FROM schema_version LIMIT 1`).Scan(&v); {
+	case errors.Is(err, sql.ErrNoRows):
+		// first run — current stays 0
+	case err != nil:
+		return fmt.Errorf("migrations: read version: %w", err)
+	case v.Valid:
 		current = int(v.Int64)
 	}
 
@@ -90,7 +133,7 @@ func (d *DB) runMigrations() error {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: clear version: %w", name, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_version (version) VALUES (?)`, n); err != nil {
+		if _, err := tx.Exec(d.q(`INSERT INTO schema_version (version) VALUES (?)`), n); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: set version: %w", name, err)
 		}

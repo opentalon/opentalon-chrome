@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
@@ -304,7 +305,7 @@ func (c *Client) GetCookies(ctx context.Context, rawURL, domain string) (string,
 	if domain != "" {
 		filtered := cookies[:0]
 		for _, c := range cookies {
-			if strings.HasSuffix(c.Domain, domain) || strings.HasSuffix(strings.TrimPrefix(c.Domain, "."), domain) {
+			if cookieDomainMatches(c.Domain, domain) {
 				filtered = append(filtered, c)
 			}
 		}
@@ -340,15 +341,25 @@ func (c *Client) NavigateWithCookies(ctx context.Context, rawURL, cookiesJSON st
 	}
 	params := make([]*network.CookieParam, len(stored))
 	for i, c := range stored {
-		params[i] = &network.CookieParam{
-			Name:     c.Name,
-			Value:    c.Value,
-			Domain:   c.Domain,
-			Path:     c.Path,
-			Secure:   c.Secure,
-			HTTPOnly: c.HTTPOnly,
-			SameSite: c.SameSite,
+		p := &network.CookieParam{
+			Name:         c.Name,
+			Value:        c.Value,
+			Domain:       c.Domain,
+			Path:         c.Path,
+			Secure:       c.Secure,
+			HTTPOnly:     c.HTTPOnly,
+			SameSite:     c.SameSite,
+			Priority:     c.Priority,
+			SourceScheme: c.SourceScheme,
+			SourcePort:   c.SourcePort,
+			PartitionKey: c.PartitionKey,
 		}
+		// Preserve expiry for persistent cookies; session cookies have Expires == -1.
+		if c.Expires >= 0 {
+			t := cdp.TimeSinceEpoch(time.Unix(int64(c.Expires), 0))
+			p.Expires = &t
+		}
+		params[i] = p
 	}
 
 	var title string
@@ -362,6 +373,15 @@ func (c *Client) NavigateWithCookies(ctx context.Context, rawURL, cookiesJSON st
 		return "", fmt.Errorf("navigate with cookies to %s: %w", rawURL, err)
 	}
 	return title, nil
+}
+
+// cookieDomainMatches reports whether the cookie domain matches target using
+// label-boundary semantics. A leading dot in cookieDomain (the RFC 6265 host-
+// only flag indicator used by Chrome) is stripped before comparison.
+// This prevents "evil-example.com" from matching a target of "example.com".
+func cookieDomainMatches(cookieDomain, target string) bool {
+	d := strings.TrimPrefix(cookieDomain, ".")
+	return d == target || strings.HasSuffix(d, "."+target)
 }
 
 // screenshotFilename turns a URL into a safe .png filename.
