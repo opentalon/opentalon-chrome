@@ -73,8 +73,9 @@ func (d *DB) Close() error { return d.db.Close() }
 // SQLDB returns the raw *sql.DB for use by the Store.
 func (d *DB) SQLDB() *sql.DB { return d.db }
 
-// q rewrites query placeholders for the active driver.
-// SQLite uses ?, PostgreSQL uses $1, $2, ...
+// q rewrites ? → $N for Postgres. Only handles bare placeholders;
+// does not parse quoted strings. All queries in this package use
+// simple ? params so this is sufficient.
 func (d *DB) q(query string) string {
 	if d.driver != "postgres" {
 		return query

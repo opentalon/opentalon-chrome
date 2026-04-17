@@ -137,7 +137,7 @@ func (h *Handler) Capabilities() pluginpkg.CapabilitiesMsg {
 			// ── Login session / cookie actions ────────────────────────────────────
 			{
 				Name:        "get_login_url",
-				Description: "Returns the URL and password for the interactive VNC Chrome session where the user can log in to a service manually. Call this before asking the user to log in.",
+				Description: "Returns the URL and password for the interactive Chrome session. The user opens this URL to log in to a service manually.",
 				// UserOnly: true — re-enable once opentalon pkg/plugin.ActionMsg includes UserOnly.
 			},
 			{

@@ -92,16 +92,18 @@ chromium --headless --no-sandbox --remote-debugging-port=9222
 
 Configuration is delivered as a JSON string by the OpenTalon host via the `Configure` RPC call during the Capabilities handshake (populated from the plugin's `config:` block in `config.yaml`). Individual `CHROME_*` environment variables override those values and can be used for ad-hoc overrides or standalone testing.
 
-| config.yaml key    | Env var override          | Default                 | Description                                                               |
-|--------------------|---------------------------|-------------------------|---------------------------------------------------------------------------|
-| `cdp_url`          | `CHROME_CDP_URL`          | `http://localhost:9222` | Chrome DevTools Protocol base URL (headless Chrome)                       |
-| `screenshot_dir`   | `CHROME_SCREENSHOT_DIR`   | `os.TempDir()`          | Directory where screenshot PNG files are saved                            |
-| `timeout`          | `CHROME_TIMEOUT`          | `30s`                   | Per-action deadline as a Go duration string (e.g. `45s`)                  |
-| —                  | `CHROME_GRPC_PORT`        | —                       | If set, listen on this TCP port instead of a Unix socket                  |
-| `data_dir`         | `CHROME_DATA_DIR`         | `os.TempDir()`          | Directory for the credential SQLite database (`state.db`)                 |
-| `login_cdp_url`    | `CHROME_LOGIN_CDP_URL`    | —                       | CDP URL of the interactive login Chrome instance (noVNC sidecar)          |
-| `login_url`        | `CHROME_LOGIN_URL`        | —                       | noVNC web UI URL to present to the user for manual login                  |
-| `login_password`   | `CHROME_LOGIN_PASSWORD`   | —                       | noVNC session password                                                    |
+| config.yaml key      | Env var override              | Default                 | Description                                                                                         |
+|----------------------|-------------------------------|-------------------------|-----------------------------------------------------------------------------------------------------|
+| `cdp_url`            | `CHROME_CDP_URL`              | `http://localhost:9222` | Chrome DevTools Protocol base URL (headless Chrome)                                                 |
+| `screenshot_dir`     | `CHROME_SCREENSHOT_DIR`       | `os.TempDir()`          | Directory where screenshot PNG files are saved                                                      |
+| `timeout`            | `CHROME_TIMEOUT`              | `30s`                   | Per-action deadline as a Go duration string (e.g. `45s`)                                            |
+| —                    | `CHROME_GRPC_PORT`            | —                       | If set, listen on this TCP port instead of a Unix socket                                            |
+| `data_dir`           | `CHROME_DATA_DIR`             | **required**            | Directory for the credential SQLite database (`state.db`). One of `data_dir` or `database_url` must be set. |
+| `database_url`       | `CHROME_DATABASE_URL`         | —                       | PostgreSQL connection string (e.g. `postgres://user:pass@host/db?sslmode=disable`). Alternative to `data_dir`; one of the two must be set. |
+| `login_cdp_url`      | `CHROME_LOGIN_CDP_URL`        | —                       | CDP URL of the interactive login Chrome instance (noVNC sidecar)                                    |
+| `login_url`          | `CHROME_LOGIN_URL`            | —                       | noVNC web UI URL to present to the user for manual login                                            |
+| `login_password`     | `CHROME_LOGIN_PASSWORD`       | —                       | noVNC session password                                                                              |
+| `allow_client_actor_id` | `CHROME_ALLOW_CLIENT_ACTOR_ID` | `false`              | Allow credential actions in multi-tenant deployments. **Warning:** actor_id is caller-supplied and not yet verified by the host; only enable on single-tenant deployments. |
 
 ## Available actions
 
@@ -126,7 +128,7 @@ These actions require the login sidecar to be configured (see [Browser login ses
 
 | Action               | Required args      | Optional args | Returns                                                        |
 |----------------------|--------------------|---------------|----------------------------------------------------------------|
-| `start_login_session`| —                  | —             | noVNC URL and session password for the user to open            |
+| `get_login_url`      | —                  | —             | noVNC URL and session password for the user to open            |
 | `get_cookies`        | `url`              | `domain`      | JSON array of cookies from the interactive Chrome instance     |
 | `save_credentials`   | `name`, `cookies`  | —             | Confirmation; stores cookies under this entity + name          |
 | `get_credentials`    | `name`             | —             | Cookie JSON for the given credential name                      |
@@ -146,7 +148,7 @@ Some services require an interactive login that cannot be automated (e.g. CAPTCH
 ### How it works
 
 ```
-1. Agent calls start_login_session
+1. Agent calls get_login_url
    → returns noVNC URL + session password
 
 2. User opens the URL in their browser
