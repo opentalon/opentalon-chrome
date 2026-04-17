@@ -3,22 +3,26 @@ package plugin
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/opentalon/opentalon-chrome/browser"
+	"github.com/opentalon/opentalon-chrome/store"
 	pluginpkg "github.com/opentalon/opentalon/pkg/plugin"
 )
 
 // stubBrowser is a test double for browser.Browser.
 type stubBrowser struct {
-	navigateFunc    func(ctx context.Context, url string) (string, error)
-	getTextFunc     func(ctx context.Context, url, selector string) (string, error)
-	getHTMLFunc     func(ctx context.Context, url, selector string) (string, error)
-	screenshotFunc  func(ctx context.Context, url, selector, outputDir string) (string, []byte, error)
-	clickFunc       func(ctx context.Context, url, selector string) error
-	typeTextFunc    func(ctx context.Context, url, selector, text string) error
-	evaluateFunc    func(ctx context.Context, url, script string) (string, error)
+	navigateFunc             func(ctx context.Context, url string) (string, error)
+	getTextFunc              func(ctx context.Context, url, selector string) (string, error)
+	getHTMLFunc              func(ctx context.Context, url, selector string) (string, error)
+	screenshotFunc           func(ctx context.Context, url, selector, outputDir string) (string, []byte, error)
+	clickFunc                func(ctx context.Context, url, selector string) error
+	typeTextFunc             func(ctx context.Context, url, selector, text string) error
+	evaluateFunc             func(ctx context.Context, url, script string) (string, error)
+	getCookiesFunc           func(url string) (string, error)
+	navigateWithCookiesFunc  func(url string) (string, error)
 }
 
 var _ browser.Browser = (*stubBrowser)(nil)
@@ -44,9 +48,37 @@ func (s *stubBrowser) TypeText(ctx context.Context, url, selector, text string) 
 func (s *stubBrowser) Evaluate(ctx context.Context, url, script string) (string, error) {
 	return s.evaluateFunc(ctx, url, script)
 }
+func (s *stubBrowser) GetCookies(_ context.Context, url, _ string) (string, error) {
+	if s.getCookiesFunc != nil {
+		return s.getCookiesFunc(url)
+	}
+	return "[]", nil
+}
+func (s *stubBrowser) NavigateWithCookies(_ context.Context, url, _ string) (string, error) {
+	if s.navigateWithCookiesFunc != nil {
+		return s.navigateWithCookiesFunc(url)
+	}
+	return url + " title", nil
+}
 
 func newTestHandler(b browser.Browser) *Handler {
 	return &Handler{b: b, screenshotDir: "/tmp", timeout: 30 * time.Second}
+}
+
+func newTestHandlerWithStore(t *testing.T, b browser.Browser) *Handler {
+	t.Helper()
+	db, err := store.OpenSQLite(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &Handler{
+		b:                  b,
+		screenshotDir:      "/tmp",
+		timeout:            30 * time.Second,
+		store:              store.New(db),
+		allowClientActorID: true, // test-only opt-in; production requires explicit config
+	}
 }
 
 // --- Capabilities ---
@@ -66,7 +98,11 @@ func TestCapabilities(t *testing.T) {
 	for _, a := range caps.Actions {
 		actionNames[a.Name] = true
 	}
-	expected := []string{"navigate", "get_text", "get_html", "screenshot", "click", "type_text", "evaluate"}
+	expected := []string{
+		"navigate", "get_text", "get_html", "screenshot", "click", "type_text", "evaluate",
+		"get_login_url", "get_cookies", "navigate_with_cookies",
+		"save_credentials", "get_credentials", "list_credentials", "delete_credentials",
+	}
 	for _, name := range expected {
 		if !actionNames[name] {
 			t.Errorf("missing action %q in capabilities", name)
@@ -258,6 +294,356 @@ func TestExecute_screenshot_largeImage(t *testing.T) {
 	}
 	if !contains(resp.Content, "too large") {
 		t.Errorf("expected size note in Content, got: %s", resp.Content)
+	}
+}
+
+// --- get_login_url ---
+
+func TestExecute_getLoginURL_noURL(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	// loginURL is empty — should return an error.
+	resp := h.Execute(pluginpkg.Request{ID: "s1", Action: "get_login_url"})
+	if resp.Error == "" {
+		t.Error("expected error when loginURL is not configured")
+	}
+}
+
+func TestExecute_getLoginURL_success(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	h.loginURL = "https://chrome-login.example.com"
+	h.loginPassword = "testpass"
+	resp := h.Execute(pluginpkg.Request{ID: "s2", Action: "get_login_url"})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "https://chrome-login.example.com") {
+		t.Errorf("Content should contain the login URL, got: %s", resp.Content)
+	}
+	if !strings.Contains(resp.Content, "testpass") {
+		t.Errorf("Content should contain the password, got: %s", resp.Content)
+	}
+}
+
+// --- get_cookies ---
+
+func TestExecute_getCookies_missingURL(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{ID: "gc1", Action: "get_cookies", Args: map[string]string{}})
+	if resp.Error == "" {
+		t.Error("expected error when url is missing")
+	}
+}
+
+func TestExecute_getCookies_success(t *testing.T) {
+	b := &stubBrowser{
+		getCookiesFunc: func(_ string) (string, error) {
+			return `[{"name":"session","value":"xyz"}]`, nil
+		},
+	}
+	resp := newTestHandler(b).Execute(pluginpkg.Request{
+		ID:     "gc2",
+		Action: "get_cookies",
+		Args:   map[string]string{"url": "https://app.example.com"},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "session") {
+		t.Errorf("Content should contain cookie data, got: %s", resp.Content)
+	}
+}
+
+func TestExecute_getCookies_usesLoginBrowserWhenSet(t *testing.T) {
+	headless := &stubBrowser{
+		getCookiesFunc: func(_ string) (string, error) { return `["headless"]`, nil },
+	}
+	login := &stubBrowser{
+		getCookiesFunc: func(_ string) (string, error) { return `["login"]`, nil },
+	}
+	h := newTestHandler(headless)
+	h.loginBrowser = login
+
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "gc3",
+		Action: "get_cookies",
+		Args:   map[string]string{"url": "https://app.example.com"},
+	})
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "login") {
+		t.Errorf("expected login browser cookies, got: %s", resp.Content)
+	}
+}
+
+func TestExecute_getCookies_browserError(t *testing.T) {
+	b := &stubBrowser{
+		getCookiesFunc: func(_ string) (string, error) {
+			return "", errors.New("CDP unavailable")
+		},
+	}
+	resp := newTestHandler(b).Execute(pluginpkg.Request{
+		ID:     "gc4",
+		Action: "get_cookies",
+		Args:   map[string]string{"url": "https://app.example.com"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error from browser")
+	}
+}
+
+// --- navigate_with_cookies ---
+
+func TestExecute_navigateWithCookies_missingURL(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "nwc1",
+		Action: "navigate_with_cookies",
+		Args:   map[string]string{"cookies": "[]"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when url is missing")
+	}
+}
+
+func TestExecute_navigateWithCookies_missingCookies(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "nwc2",
+		Action: "navigate_with_cookies",
+		Args:   map[string]string{"url": "https://app.example.com"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when cookies is missing")
+	}
+}
+
+func TestExecute_navigateWithCookies_success(t *testing.T) {
+	b := &stubBrowser{
+		navigateWithCookiesFunc: func(url string) (string, error) {
+			return "Dashboard — example.com", nil
+		},
+	}
+	resp := newTestHandler(b).Execute(pluginpkg.Request{
+		ID:     "nwc3",
+		Action: "navigate_with_cookies",
+		Args:   map[string]string{"url": "https://app.example.com/dash", "cookies": `[]`},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "https://app.example.com/dash") {
+		t.Errorf("Content should contain URL, got: %s", resp.Content)
+	}
+}
+
+// --- credential actions disabled by default ---
+
+func TestExecute_credentialActions_disabledByDefault(t *testing.T) {
+	// newTestHandlerWithStore opts in; use a raw handler to verify the default.
+	db, err := store.OpenSQLite(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	h := &Handler{
+		b:             &stubBrowser{},
+		screenshotDir: "/tmp",
+		timeout:       30 * time.Second,
+		store:         store.New(db),
+		// allowClientActorID intentionally left false (the default)
+	}
+	for _, action := range []string{"save_credentials", "get_credentials", "list_credentials", "delete_credentials"} {
+		resp := h.Execute(pluginpkg.Request{
+			ID:     action + "_disabled",
+			Action: action,
+			Args:   map[string]string{"actor_id": "alice", "name": "x", "cookies": "[]"},
+		})
+		if resp.Error == "" {
+			t.Errorf("%s: expected error when allowClientActorID=false, got success", action)
+		}
+		if !strings.Contains(resp.Error, "allow_client_actor_id") {
+			t.Errorf("%s: error should mention allow_client_actor_id, got: %s", action, resp.Error)
+		}
+	}
+}
+
+// --- save_credentials ---
+
+func TestExecute_saveCredentials_noStore(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "sc1",
+		Action: "save_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp", "cookies": "[]"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when store is nil")
+	}
+}
+
+func TestExecute_saveCredentials_noActorID(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "sc2",
+		Action: "save_credentials",
+		Args:   map[string]string{"name": "myapp", "cookies": "[]"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when actor_id is missing")
+	}
+}
+
+func TestExecute_saveCredentials_noName(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "sc3",
+		Action: "save_credentials",
+		Args:   map[string]string{"actor_id": "alice", "cookies": "[]"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when name is missing")
+	}
+}
+
+func TestExecute_saveCredentials_success(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "sc4",
+		Action: "save_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work", "cookies": `[{"name":"sid","value":"abc"}]`},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "myapp-work") {
+		t.Errorf("Content should mention the saved name, got: %s", resp.Content)
+	}
+}
+
+// --- get_credentials ---
+
+func TestExecute_getCredentials_noStore(t *testing.T) {
+	h := newTestHandler(&stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "gc_s1",
+		Action: "get_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when store is nil")
+	}
+}
+
+func TestExecute_getCredentials_notFound(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "gc_s2",
+		Action: "get_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "missing"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error for missing credentials")
+	}
+}
+
+func TestExecute_getCredentials_success(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	// Save first, then retrieve.
+	h.Execute(pluginpkg.Request{
+		ID:     "gc_setup",
+		Action: "save_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work", "cookies": `["cookie1"]`},
+	})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "gc_s3",
+		Action: "get_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work"},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if resp.Content != `["cookie1"]` {
+		t.Errorf("Content = %q, want [\"cookie1\"]", resp.Content)
+	}
+}
+
+// --- list_credentials ---
+
+func TestExecute_listCredentials_empty(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "lc1",
+		Action: "list_credentials",
+		Args:   map[string]string{"actor_id": "alice"},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "No saved") {
+		t.Errorf("expected empty message, got: %s", resp.Content)
+	}
+}
+
+func TestExecute_listCredentials_multiple(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	for _, name := range []string{"myapp-personal", "myapp-work"} {
+		h.Execute(pluginpkg.Request{
+			ID:     "lc_setup_" + name,
+			Action: "save_credentials",
+			Args:   map[string]string{"actor_id": "alice", "name": name, "cookies": "[]"},
+		})
+	}
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "lc2",
+		Action: "list_credentials",
+		Args:   map[string]string{"actor_id": "alice"},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if !strings.Contains(resp.Content, "myapp-personal") || !strings.Contains(resp.Content, "myapp-work") {
+		t.Errorf("Content should list both credentials, got: %s", resp.Content)
+	}
+}
+
+// --- delete_credentials ---
+
+func TestExecute_deleteCredentials_success(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	h.Execute(pluginpkg.Request{
+		ID:     "dc_setup",
+		Action: "save_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work", "cookies": "[]"},
+	})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "dc1",
+		Action: "delete_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work"},
+	})
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	// Confirm it's gone.
+	getResp := h.Execute(pluginpkg.Request{
+		ID:     "dc_verify",
+		Action: "get_credentials",
+		Args:   map[string]string{"actor_id": "alice", "name": "myapp-work"},
+	})
+	if getResp.Error == "" {
+		t.Error("expected error after deletion, got nil")
+	}
+}
+
+func TestExecute_deleteCredentials_noName(t *testing.T) {
+	h := newTestHandlerWithStore(t, &stubBrowser{})
+	resp := h.Execute(pluginpkg.Request{
+		ID:     "dc2",
+		Action: "delete_credentials",
+		Args:   map[string]string{"actor_id": "alice"},
+	})
+	if resp.Error == "" {
+		t.Error("expected error when name is missing")
 	}
 }
 

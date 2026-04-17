@@ -10,6 +10,7 @@ func TestLoad_defaults(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
+	t.Setenv("CHROME_DATA_DIR", t.TempDir())
 
 	cfg, err := Load("")
 	if err != nil {
@@ -30,11 +31,13 @@ func TestLoad_fromJSON(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "")
 	t.Setenv("CHROME_SCREENSHOT_DIR", "")
 	t.Setenv("CHROME_TIMEOUT", "")
+	t.Setenv("CHROME_DATA_DIR", "")
 
 	cfg, err := Load(`{
 		"cdp_url": "http://chrome-sidecar:9222",
 		"screenshot_dir": "/data/screenshots",
-		"timeout": "60s"
+		"timeout": "60s",
+		"data_dir": "/data/creds"
 	}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
@@ -52,8 +55,9 @@ func TestLoad_fromJSON(t *testing.T) {
 
 func TestLoad_envOverridesJSON(t *testing.T) {
 	t.Setenv("CHROME_CDP_URL", "http://from-env:9222")
+	t.Setenv("CHROME_DATA_DIR", "/env/data")
 
-	cfg, err := Load(`{"cdp_url": "http://from-json:9222"}`)
+	cfg, err := Load(`{"cdp_url": "http://from-json:9222", "data_dir": "/json/data"}`)
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -87,5 +91,86 @@ func TestParseTimeout_empty(t *testing.T) {
 	cfg := Config{}
 	if cfg.ParseTimeout() != DefaultTimeout {
 		t.Errorf("ParseTimeout = %v, want default %v for empty", cfg.ParseTimeout(), DefaultTimeout)
+	}
+}
+
+// --- New login / store fields ---
+
+func TestLoad_loginFieldsFromJSON(t *testing.T) {
+	t.Setenv("CHROME_LOGIN_CDP_URL", "")
+	t.Setenv("CHROME_LOGIN_URL", "")
+	t.Setenv("CHROME_LOGIN_PASSWORD", "")
+	t.Setenv("CHROME_DATA_DIR", "")
+
+	cfg, err := Load(`{
+		"login_cdp_url": "http://chrome-login:9222",
+		"login_url": "https://chrome-login.example.com",
+		"login_password": "s3cr3t",
+		"data_dir": "/data/creds"
+	}`)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.LoginCDPURL != "http://chrome-login:9222" {
+		t.Errorf("LoginCDPURL = %q, want http://chrome-login:9222", cfg.LoginCDPURL)
+	}
+	if cfg.LoginURL != "https://chrome-login.example.com" {
+		t.Errorf("LoginURL = %q, want https://chrome-login.example.com", cfg.LoginURL)
+	}
+	if cfg.LoginPassword != "s3cr3t" {
+		t.Errorf("LoginPassword = %q, want s3cr3t", cfg.LoginPassword)
+	}
+	if cfg.DataDir != "/data/creds" {
+		t.Errorf("DataDir = %q, want /data/creds", cfg.DataDir)
+	}
+}
+
+func TestLoad_loginFieldsEnvOverride(t *testing.T) {
+	t.Setenv("CHROME_LOGIN_CDP_URL", "http://env-login:9222")
+	t.Setenv("CHROME_LOGIN_URL", "https://env.example.com")
+	t.Setenv("CHROME_LOGIN_PASSWORD", "env-pass")
+	t.Setenv("CHROME_DATA_DIR", "/env/data")
+
+	cfg, err := Load(`{
+		"login_cdp_url": "http://json-login:9222",
+		"login_url": "https://json.example.com",
+		"login_password": "json-pass",
+		"data_dir": "/json/data"
+	}`)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.LoginCDPURL != "http://env-login:9222" {
+		t.Errorf("LoginCDPURL = %q, want env override", cfg.LoginCDPURL)
+	}
+	if cfg.LoginURL != "https://env.example.com" {
+		t.Errorf("LoginURL = %q, want env override", cfg.LoginURL)
+	}
+	if cfg.LoginPassword != "env-pass" {
+		t.Errorf("LoginPassword = %q, want env override", cfg.LoginPassword)
+	}
+	if cfg.DataDir != "/env/data" {
+		t.Errorf("DataDir = %q, want env override", cfg.DataDir)
+	}
+}
+
+func TestLoad_storageRequired(t *testing.T) {
+	t.Setenv("CHROME_DATA_DIR", "")
+	t.Setenv("CHROME_DATABASE_URL", "")
+	_, err := Load("")
+	if err == nil {
+		t.Error("Load() should return an error when neither data_dir nor database_url is set")
+	}
+}
+
+func TestLoad_databaseURLAccepted(t *testing.T) {
+	t.Setenv("CHROME_DATA_DIR", "")
+	t.Setenv("CHROME_DATABASE_URL", "postgres://user:pass@localhost/db?sslmode=disable")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://user:pass@localhost/db?sslmode=disable" {
+		t.Errorf("DatabaseURL = %q, want postgres URL", cfg.DatabaseURL)
 	}
 }

@@ -63,6 +63,39 @@ func TestRewriteHost(t *testing.T) {
 	}
 }
 
+func TestCookieDomainMatches(t *testing.T) {
+	cases := []struct {
+		cookieDomain string
+		target       string
+		want         bool
+	}{
+		// exact match
+		{"example.com", "example.com", true},
+		// leading-dot variant (Chrome style)
+		{".example.com", "example.com", true},
+		// subdomain match
+		{"sub.example.com", "example.com", true},
+		{".sub.example.com", "example.com", true},
+		// lookalike domain must NOT match
+		{"evil-example.com", "example.com", false},
+		{"evilexample.com", "example.com", false},
+		// unrelated domain
+		{"other.com", "example.com", false},
+		// deeper subdomain
+		{"a.b.example.com", "example.com", true},
+		// target is itself a subdomain
+		{"sub.example.com", "sub.example.com", true},
+		{"other.example.com", "sub.example.com", false},
+	}
+	for _, c := range cases {
+		got := cookieDomainMatches(c.cookieDomain, c.target)
+		if got != c.want {
+			t.Errorf("cookieDomainMatches(%q, %q) = %v, want %v",
+				c.cookieDomain, c.target, got, c.want)
+		}
+	}
+}
+
 func TestScreenshotFilename(t *testing.T) {
 	cases := []struct {
 		url  string

@@ -32,4 +32,15 @@ type Browser interface {
 
 	// Evaluate navigates to url, runs script, and returns the JSON-encoded result.
 	Evaluate(ctx context.Context, url, script string) (string, error)
+
+	// GetCookies returns a JSON array of all cookies visible after navigating to
+	// url. When domain is non-empty, only cookies whose domain suffix matches are
+	// included. The returned JSON can be stored and later passed to NavigateWithCookies.
+	GetCookies(ctx context.Context, url, domain string) (string, error)
+
+	// NavigateWithCookies injects the provided cookies (a JSON array of cookie
+	// objects previously obtained via GetCookies) into the browser context, then
+	// navigates to url and returns the page title. Use this to replay a captured
+	// login session in headless Chrome.
+	NavigateWithCookies(ctx context.Context, url, cookiesJSON string) (string, error)
 }
